@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>瘋狂的士:唔撚過海 (v5.0)</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: #040408; color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            height: 100vh; overflow: hidden;
+        }
+        canvas {
+            border: 3px solid #ffcc00;
+            box-shadow: 0 0 32px rgba(255,204,0,0.35), 0 0 8px rgba(255,204,0,0.15);
+            display: block;
+        }
+        #subtitle {
+            margin-top: 10px; color: #ff2222; font-size: 18px;
+            font-weight: bold; letter-spacing: 3px; text-align: center;
+            text-shadow: 0 0 8px #ff4444;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas" width="800" height="600"></canvas>
+<div id="subtitle">殺盡香港閪客 ★ WASD移動  P暫停  R重新開始</div>
+<script>
+window.onload = function () {
+    const cvs = document.getElementById("canvas");
+    const ctx = cvs.getContext("2d");
+    const W = cvs.width, H = cvs.height;
+    const BL = 10, BR = W - 10, BT = 60, BB = H - 60;
+    const BASE_TIME = 60, GO_MS = 5000;
+    
+    // Starting max speed is 5.0 (80 km/h)
+    let maxSpeed = 5.0;   
+    const ACCEL = 0.15;       // speed gained per frame when key held
+    const DRAG_PER_CROWD = 0.4; // speed lost per nearby passenger per 60 frames
+
+    let state = "start";
+    let goReason = "", goTimer = 0;
+    let level = 1, exp = 0, cash = 0, targetExp = 5;
+    let timeLeft = BASE_TIME, frames = 0;
+    let floats = [], customers = [], bloods = [], parts = [];
+    let roadOff = 0;
+
+    const keys = {};
+    window.addEventListener("keydown", e => {
+        const k = e.key.toLowerCase();
+        keys[k] = true;
+        if (k === "p") { if (state==="playing") state="paused"; else if (state==="paused") state="playing"; }
+        if (k === "r" && (state==="gameover"||state==="start")) startGame();
+        if ((k===" "||k==="enter") && state==="start") startGame();
+        if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
+    });
+    window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+
+    const taxi = {
+        x:400, y:280, w:42, h:22, angle:0, speed:0, moving:false,
+        update(dt) {
+            if (state!=="playing") return;
+            this.moving = false;
+            let dx=0, dy=0;
+            if (keys["w"]||keys["arrowup"])    { dy=-1; this.angle=-Math.PI/2; this.moving=true; }
+            if (keys["s"]||keys["arrowdown"])   { dy=1;  this.angle=Math.PI/2; this.moving=true; }
+            if (keys["a"]||keys["arrowleft"])   { dx=-1; this.angle=Math.PI;   this.moving=true; }
+            if (keys["d"]||keys["arrowright"])  { dx=1;  this.angle=0;         this.moving=true; }
+            if ((keys["w"]||keys["arrowup"])   &&(keys["a"]||keys["arrowleft"]))  this.angle=Math.PI*1.25;
+            if ((keys["w"]||keys["arrowup"])   &&(keys["d"]||keys["arrowright"])) this.angle=Math.PI*1.75;
+            if ((keys["s"]||keys["arrowdown"]) &&(keys["a"]||keys["arrowleft"]))  this.angle=Math.PI*0.75;
+            if ((keys["s"]||keys["arrowdown"]) &&(keys["d"]||keys["arrowright"])) this.angle=Math.PI*0.25;
+            if (dx!==0&&dy!==0) { dx*=0.707; dy*=0.707; }
+            
+            // Accelerate up to dynamic maxSpeed
+            if (this.moving) {
+                this.speed = Math.min(this.speed + ACCEL * (dt/16.67), maxSpeed);
+            } else {
+                this.speed = Math.max(0, this.speed - ACCEL * 2 * (dt/16.67));
+            }
+            
+            const spd = Math.max(0, this.speed) * (dt/16.67);
+            let nx=this.x+dx*spd, ny=this.y+dy*spd;
+            if (nx<BL+this.w/2) nx=BL+this.w/2;
+            if (nx>BR-this.w/2) nx=BR-this.w/2;
+            if (ny<BT+this.h/2) ny=BT+this.h/2;
+            if (ny>BB) { doGameOver("你跌咗入維港！都話唔撚過海囉！"); return; }
+            this.x=nx; this.y=ny;
+        },
+        draw() {
+            ctx.save();
+            ctx.translate(this.x,this.y);
+            ctx.rotate(this.angle);
+            ctx.fillStyle="rgba(0,0,0,0.4)";
+            ctx.fillRect(-this.w/2+2,-this.h/2+5,this.w,this.h);
+            ctx.fillStyle="#c0120e"; ctx.fillRect(-this.w/2,-this.h/2,this.w,this.h);
+            ctx.fillStyle="#e61919"; ctx.fillRect(-this.w/2,-this.h/2,this.w-2,2);
+            ctx.fillStyle="#111";
+            [[-this.w/3-1,-this.h/2-2],[this.w/4-2,-this.h/2-2],
+             [-this.w/3-1,this.h/2-1],[this.w/4-2,this.h/2-1]].forEach(([wx,wy])=>ctx.fillRect(wx,wy,this.w/5.2,3));
+            ctx.fillStyle="#111";
+            ctx.fillRect(-this.w/3,-this.h/2,this.w/1.6,2);
+            ctx.fillRect(-this.w/3,this.h/2-2,this.w/1.6,2);
+            ctx.fillStyle="#fff";
+            const cs=(this.w/1.6)/5;
+            for(let i=0;i<5;i++) if(i%2===0) {
+                ctx.fillRect(-this.w/3+i*cs,-this.h/2,cs,2);
+                ctx.fillRect(-this.w/3+i*cs,this.h/2-2,cs,2);
+            }
+            ctx.fillStyle="#1e3a4a"; ctx.fillRect(-this.w/4,-this.h/2+2,this.w/1.7,this.h-4);
+            ctx.fillStyle="#5dade2"; ctx.fillRect(this.w/4-2,-this.h/2+2,3,this.h-4);
+            ctx.fillStyle="#34495e"; ctx.fillRect(-this.w/4,-this.h/2+2,3,this.h-4);
+            ctx.fillStyle="#f0f0ee"; ctx.fillRect(-this.w/6,-this.h/2+2,this.w/2.5,this.h-4);
+            ctx.fillStyle="#ff1111"; ctx.fillRect(-2,-5,4,10);
+            ctx.fillStyle="#ffcc00"; ctx.fillRect(-1,-3,2,6);
+            if (this.moving) {
+                ctx.fillStyle="rgba(255,255,200,0.55)";
+                ctx.fillRect(this.w/2,-this.h/2+1,10,4);
+                ctx.fillRect(this.w/2,this.h/2-5,10,4);
+                ctx.fillStyle="#ff3300";
+                ctx.fillRect(-this.w/2-2,-this.h/2+2,2,3);
+                ctx.fillRect(-this.w/2-2,this.h/2-5,2,3);
+            } else {
+                ctx.fillStyle="#888";
+                ctx.fillRect(this.w/2,-this.h/2+1,2,3);
+                ctx.fillRect(this.w/2,this.h/2-4,2,3);
+            }
+            ctx.fillStyle="#222";
+            ctx.fillRect(this.w/4,-this.h/2-3,2,2);
+            ctx.fillRect(this.w/4,this.h/2+1,2,2);
+            ctx.restore();
+        }
+    };
+
+    function startGame() {
+        level=1; exp=0; cash=0; targetExp=5;
+        timeLeft=BASE_TIME; frames=0;
+        customers=[]; floats=[]; bloods=[]; parts=[];
+        taxi.x=400; taxi.y=280; taxi.angle=0;
+        taxi.w=42; taxi.h=22; taxi.speed=0;
+        maxSpeed=5.0; // Reset max speed when starting over
+        state="playing";
+    }
+
+    function doGameOver(reason) {
+        state="gameover"; goReason=reason; goTimer=GO_MS;
+        for(let i=0;i<30;i++) spawnPart(taxi.x,taxi.y,"#ff4422");
+    }
+
+    function spawnPart(x,y,color) {
+        const a=Math.random()*Math.PI*2, s=1+Math.random()*4;
+        parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:30+Math.random()*20,maxLife:50,size:2+Math.random()*3,color});
+    }
+
+    function drawParts() {
+        for(let i=parts.length-1;i>=0;i--) {
+            const p=parts[i];
+            p.x+=p.vx; p.y+=p.vy; p.vy+=0.08; p.life--;
+            if(p.life<=0){parts.splice(i,1);continue;}
+            ctx.globalAlpha=p.life/p.maxLife;
+            ctx.fillStyle=p.color;
+            ctx.beginPath(); ctx.arc(p.x,p.y,p.size*(p.life/p.maxLife),0,Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha=1;
+    }
+
+    function drawBG() {
+        ctx.fillStyle="#1a1a1a"; ctx.fillRect(0,BT,W,BB-BT);
+        roadOff=(roadOff+(taxi.moving?0.5:0))%40;
+        ctx.strokeStyle="rgba(55,55,55,0.6)"; ctx.lineWidth=1;
+        for(let x=(roadOff*2)%40;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,BT);ctx.lineTo(x,BB);ctx.stroke();}
+        for(let y=BT+roadOff%40;y<BB;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+        const gr=ctx.createLinearGradient(0,BB-20,0,H);
+        gr.addColorStop(0,"rgba(17,51,187,0)"); gr.addColorStop(1,"rgba(17,51,187,0.95)");
+        ctx.fillStyle=gr; ctx.fillRect(0,BB-20,W,H-BB+20);
+        ctx.fillStyle="#1133cc"; ctx.fillRect(0,BB,W,H-BB);
+        const now=Date.now()/1000;
+        ctx.strokeStyle="rgba(255,255,255,0.18)"; ctx.lineWidth=1.5;
+        for(let wi=0;wi<5;wi++){
+            ctx.beginPath();
+            for(let wx=0;wx<=W;wx+=8){
+                const wy=BB+12+wi*8+Math.sin(wx/40+now*2+wi)*3;
+                wx===0?ctx.moveTo(wx,wy):ctx.lineTo(wx,wy);
+            }
+            ctx.stroke();
+        }
+        ctx.fillStyle="rgba(255,255,255,0.7)"; ctx.font="bold 17px Arial"; ctx.textAlign="center";
+        ctx.fillText("維多利亞港",W/2,BB+38);
+        ctx.strokeStyle="rgba(255,50,50,0.45)"; ctx.lineWidth=2;
+        ctx.setLineDash([12,8]);
+        ctx.beginPath();ctx.moveTo(0,BB);ctx.lineTo(W,BB);ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    function drawBloods() {
+        bloods.forEach(s=>{
+            ctx.fillStyle=s.color;
+            ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();
+            ctx.fillRect(s.x+s.ox,s.y+s.oy,s.sm,s.sm);
+            ctx.fillRect(s.x-s.oy,s.y-s.ox,s.sm,s.sm);
+        });
+    }
+
+    const phrases=["過海呀唔該！","去銅鑼灣！","過海去天后！","去老蘭唔該!","肯去香港島未？","九龍城去灣仔！"];
+    const TYPES={
+        deadline:{color:"#ff00dd",speed:()=>1.8,phrase:"幾時交detail design?",earn:3},
+        oldlady: {color:"#aeb6bf",speed:()=>0.6+Math.random()*0.3,phrase:"過海係咪都係2蚊?",earn:1},
+        normal:  {color:null,     speed:()=>1.2+Math.random()*0.5,phrase:null,earn:1},
+    };
+    const popText={deadline:"交你老味!! +$3",oldlady:"留返做帛金! +$1",normal:"唔撚過呀!! +$1"};
+
+    function spawnCust() {
+        const roll=Math.random();
+        const type=roll<0.15?"deadline":roll<0.35?"oldlady":"normal";
+        const T=TYPES[type];
+        customers.push({
+            x:Math.random()*(BR-BL-80)+BL+40,
+            y:Math.random()*(BB-BT-100)+BT+50,
+            phrase:T.phrase||phrases[Math.floor(Math.random()*phrases.length)],
+            color:T.color||"hsl("+Math.round(Math.random()*360)+",60%,60%)",
+            speed:T.speed(),type,wp:0
+        });
+    }
+
+    function drawHUD() {
+        ctx.fillStyle="rgba(0,0,0,0.9)"; ctx.fillRect(0,0,W,BT);
+        ctx.strokeStyle="#ffcc00"; ctx.lineWidth=2; ctx.strokeRect(0,0,W,BT);
+        ctx.font="bold 16px Arial"; ctx.fillStyle="#00ff88"; ctx.textAlign="left";
+        ctx.fillText("LV "+level,12,30);
+        ctx.fillStyle="#222"; ctx.fillRect(60,18,100,14);
+        const eg=ctx.createLinearGradient(60,0,160,0);
+        eg.addColorStop(0,"#00cc44"); eg.addColorStop(1,"#00ff88");
+        ctx.fillStyle=eg; ctx.fillRect(60,18,Math.min(1,exp/targetExp)*100,14);
+        ctx.strokeStyle="#555"; ctx.lineWidth=1; ctx.strokeRect(60,18,100,14);
+        ctx.fillStyle="#fff"; ctx.font="9px Arial"; ctx.textAlign="center";
+        ctx.fillText("$"+exp+"/$"+targetExp,110,29);
+        ctx.fillStyle="#ffcc00"; ctx.font="bold 16px Arial"; ctx.textAlign="left";
+        ctx.fillText("💰 $"+cash,175,30);
+        ctx.fillStyle="#ff3333"; ctx.font="bold 15px Arial"; ctx.textAlign="center";
+        ctx.fillText("瘋狂的士：唔撚過海",W/2+90,28);
+        const flash=timeLeft<=10&&Math.floor(Date.now()/300)%2===0;
+        ctx.fillStyle=flash?"#ff0000":"#ffcc00";
+        ctx.font="bold 18px Arial"; ctx.textAlign="right";
+        ctx.fillText("⏱ "+timeLeft+"s",W-14,32);
+        
+        // speed gauge
+        const gx=14,gy=H-120,gw=155,gh=50;
+        ctx.fillStyle="rgba(0,0,0,0.8)"; ctx.fillRect(gx,gy,gw,gh);
+        ctx.strokeStyle="#ffcc00"; ctx.lineWidth=1.5; ctx.strokeRect(gx,gy,gw,gh);
+        ctx.font="bold 11px Arial"; ctx.fillStyle="#aaa"; ctx.textAlign="left";
+        ctx.fillText("車速",gx+8,gy+16);
+        ctx.fillStyle="#1a1a1a"; ctx.fillRect(gx+8,gy+22,gw-16,12);
+        const displaySpeed = Math.max(0, taxi.speed);
+        
+        const ratio = displaySpeed / maxSpeed;
+        const bc=ratio>0.6?"#00ff66":ratio>0.25?"#ffaa00":"#ff2222";
+        ctx.fillStyle=bc; ctx.fillRect(gx+8,gy+22,(gw-16)*ratio,12);
+        ctx.strokeStyle="#444"; ctx.lineWidth=1; ctx.strokeRect(gx+8,gy+22,gw-16,12);
+        ctx.fillStyle=bc; ctx.font="bold 14px Arial";
+        
+        // Display speed scales by 16 (so 5.0 internal = 80 km/h)
+        ctx.fillText(Math.round(displaySpeed * 16)+" km/h",gx+8,gy+48);
+    }
+
+    function drawStart() {
+        ctx.fillStyle="#0a0a0a"; ctx.fillRect(0,0,W,H);
+        ctx.strokeStyle="rgba(255,204,0,0.07)"; ctx.lineWidth=1;
+        for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+        for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+        ctx.textAlign="center";
+        ctx.fillStyle="#ffcc00"; ctx.font="bold 52px Arial";
+        ctx.shadowColor="#ffcc00"; ctx.shadowBlur=22;
+        ctx.fillText("瘋狂的士",W/2,H/2-85);
+        ctx.shadowBlur=0;
+        ctx.fillStyle="#ff3333"; ctx.font="bold 28px Arial";
+        ctx.fillText("唔撚過海",W/2,H/2-48);
+        ctx.fillStyle="#aaa"; ctx.font="16px Arial";
+        ctx.fillText("WASD / 方向鍵 移動  ●  P 暫停  ●  R 重新開始",W/2,H/2+8);
+        ctx.fillStyle="#555"; ctx.font="13px Arial";
+        ctx.fillText("閪客走近你的士 — 撞死佢哋賺錢，但唔好跌入維港！",W/2,H/2+36);
+        ctx.globalAlpha=0.7+0.3*Math.sin(Date.now()/400);
+        ctx.fillStyle="#ffcc00"; ctx.font="bold 20px Arial";
+        ctx.fillText("按 ENTER 或 SPACE 開始",W/2,H/2+88);
+        ctx.globalAlpha=1;
+    }
+
+    function drawPause() {
+        ctx.fillStyle="rgba(0,0,0,0.7)"; ctx.fillRect(0,0,W,H);
+        ctx.fillStyle="#ffcc00"; ctx.font="bold 42px Arial"; ctx.textAlign="center";
+        ctx.fillText("⏸ 暫停",W/2,H/2-20);
+        ctx.fillStyle="#aaa"; ctx.font="16px Arial";
+        ctx.fillText("按 P 繼續",W/2,H/2+24);
+    }
+
+    function drawGO() {
+        ctx.fillStyle="rgba(0,0,0,0.88)"; ctx.fillRect(0,0,W,H);
+        ctx.fillStyle="#ff3333"; ctx.font="bold 28px Arial"; ctx.textAlign="center";
+        ctx.fillText(goReason,W/2,H/2-55);
+        ctx.fillStyle="#ffcc00"; ctx.font="bold 24px Arial";
+        ctx.fillText("LV "+level+"  ●  總收入 $"+cash,W/2,H/2);
+        const pct=Math.max(0,goTimer/GO_MS);
+        ctx.fillStyle="#333"; ctx.fillRect(W/2-120,H/2+30,240,8);
+        ctx.fillStyle="#ffcc00"; ctx.fillRect(W/2-120,H/2+30,240*(1-pct),8);
+        ctx.fillStyle="#888"; ctx.font="14px Arial";
+        ctx.fillText("按 R 立即重新開始",W/2,H/2+68);
+    }
+
+    let lastT=0;
+    function loop(ts) {
+        const dt=Math.min(ts-lastT,50); lastT=ts;
+        ctx.fillStyle="#080808"; ctx.fillRect(0,0,W,H);
+        if (state==="start") { drawStart(); requestAnimationFrame(loop); return; }
+        drawBG(); drawBloods();
+        if (state==="playing") {
+            frames++;
+            if (frames>=60) { timeLeft--; frames=0; if(timeLeft<=0) doGameOver("時間到！成功拒載咗大量港島客！"); }
+        }
+        let crowd=0;
+        const PROX=Math.max(80,taxi.w*1.5);
+        if (state==="playing"&&Math.random()<0.012+0.008*level&&customers.length<5+2*level) spawnCust();
+        for (let i=customers.length-1;i>=0;i--) {
+            const c=customers[i];
+            const dx=taxi.x-c.x, dy=taxi.y-c.y, dist=Math.hypot(dx,dy);
+            if (state==="playing") {
+                if(dist>5){c.x+=(dx/dist)*c.speed;c.y+=(dy/dist)*c.speed;}
+                if(dist<PROX) crowd++;
+                if(dist<Math.max(28,taxi.w*0.65)&&taxi.moving) {
+                    const earn=TYPES[c.type].earn;
+                    exp+=earn; cash+=earn;
+                    
+                    // --- LEVEL UP LOGIC ---
+                    while(exp>=targetExp){
+                        exp-=targetExp;
+                        level++;
+                        targetExp=Math.round(targetExp*1.5);
+                        taxi.w*=1.1;
+                        taxi.h*=1.1;
+                        
+                        // FIX: Adds exactly 5 km/h to display speed (5 / 16 = 0.3125)
+                        maxSpeed += 0.3125; 
+                        
+                        floats.push({x:taxi.x,y:taxi.y-30,text:"⬆ LEVEL UP! SIZE & SPEED UP!",life:55,isLU:true});
+                        for(let p=0;p<15;p++) spawnPart(taxi.x,taxi.y,"#00ff88");
+                    }
+                    
+                    floats.push({x:c.x,y:c.y,text:popText[c.type],life:35,type:c.type,isLU:false});
+                    bloods.push({x:c.x,y:c.y,r:c.type==="deadline"?12:8+Math.random()*8,
+                        color:c.type==="deadline"?"#700000":"#aa0000",
+                        ox:(Math.random()-0.5)*24,oy:(Math.random()-0.5)*24,sm:2+Math.random()*3});
+                    for(let p=0;p<8;p++) spawnPart(c.x,c.y,"#cc2200");
+                    customers.splice(i,1); continue;
+                }
+            }
+            if(dist<PROX*1.3){
+                c.wp=(c.wp||0)+0.15;
+                ctx.globalAlpha=0.12+0.08*Math.sin(c.wp);
+                ctx.fillStyle=c.type==="deadline"?"#ff00ff":"#ff4400";
+                ctx.beginPath();ctx.arc(c.x,c.y,PROX*0.55,0,Math.PI*2);ctx.fill();
+                ctx.globalAlpha=1;
+            }
+            ctx.fillStyle=c.color;
+            if(c.type==="oldlady"){ctx.fillRect(c.x-5,c.y-9,10,18);ctx.fillStyle="#dde";ctx.fillRect(c.x-4,c.y-14,8,5);}
+            else{ctx.fillRect(c.x-7,c.y-12,14,24);ctx.fillStyle="#ffdcb2";ctx.fillRect(c.x-4,c.y-17,8,8);}
+            ctx.fillStyle=c.type==="deadline"?"#ffff00":c.type==="oldlady"?"#00ffff":"#fff";
+            ctx.font=c.type!=="normal"?"bold 13px Arial":"bold 12px Arial";
+            ctx.textAlign="center"; ctx.fillText(c.phrase,c.x,c.y-22);
+        }
+        if(state==="playing"){
+            // Passengers drag speed down regardless of key input
+            if(crowd>0) {
+                taxi.speed -= (DRAG_PER_CROWD/60) * crowd;
+            }
+            if(taxi.speed<0) { doGameOver("閪客成功上車！"); }
+        }
+        taxi.update(dt); taxi.draw(); drawParts();
+        for(let k=floats.length-1;k>=0;k--){
+            const t=floats[k];
+            ctx.font=t.isLU?"bold 22px Arial":"bold 20px Arial";
+            ctx.fillStyle=t.isLU?"#00ff88":t.type==="deadline"?"#ffff00":t.type==="oldlady"?"#00ffff":"#ff4444";
+            ctx.textAlign="center"; ctx.globalAlpha=Math.max(0,t.life/35);
+            ctx.fillText(t.text,t.x,t.y); ctx.globalAlpha=1;
+            t.y-=1.5; t.life--; if(t.life<=0) floats.splice(k,1);
+        }
+        drawHUD();
+        if(state==="paused") drawPause();
+        if(state==="gameover"){goTimer-=dt; if(goTimer<=0) startGame(); else drawGO();}
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+};
+</script>
+</body>
+</html>
